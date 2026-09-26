@@ -718,3 +718,62 @@ func TestChunkConverter(t *testing.T) {
 		assert.Equal(t, 3, out.ContentBlocks[0].StreamingMeta.Index)
 	})
 }
+func TestChunkConverter_ContentAfterToolCalls(t *testing.T) {
+	intPtr := func(i int) *int { return &i }
+	toolChunk := func(index int, id, name, args string) *schema.Message {
+		return &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{Index: intPtr(index), ID: id, Function: schema.FunctionCall{Name: name, Arguments: args}},
+			},
+		}
+	}
+	textChunk := func(text string) *schema.Message {
+		return &schema.Message{Role: schema.Assistant, Content: text}
+	}
+	indexOf := func(t *testing.T, conv *chunkConverter, msg *schema.Message) int {
+		out, err := conv.convert(msg)
+		assert.NoError(t, err)
+		assert.Len(t, out.ContentBlocks, 1)
+		return out.ContentBlocks[0].StreamingMeta.Index
+	}
+
+	t.Run("text, tool call, then text again", func(t *testing.T) {
+		conv := newChunkConverter()
+		assert.Equal(t, 0, indexOf(t, conv, textChunk("ALPHA")))
+		assert.Equal(t, 1, indexOf(t, conv, toolChunk(0, "call_1", "get_time", `{"city"`)))
+		assert.Equal(t, 1, indexOf(t, conv, toolChunk(0, "", "", `: "Madrid"}`)))
+		// The trailing text is a new block, not a continuation of the tool call.
+		assert.Equal(t, 2, indexOf(t, conv, textChunk("OMEGA")))
+		assert.Equal(t, 2, indexOf(t, conv, textChunk(" done")))
+	})
+
+	t.Run("text, two tool calls, text, then another tool call", func(t *testing.T) {
+		conv := newChunkConverter()
+		assert.Equal(t, 0, indexOf(t, conv, textChunk("let me check")))
+		assert.Equal(t, 1, indexOf(t, conv, toolChunk(0, "call_1", "get_weather", `{}`)))
+		assert.Equal(t, 2, indexOf(t, conv, toolChunk(1, "call_2", "get_time", `{}`)))
+		assert.Equal(t, 3, indexOf(t, conv, textChunk("and now")))
+		assert.Equal(t, 4, indexOf(t, conv, toolChunk(0, "call_3", "get_news", `{}`)))
+	})
+
+	t.Run("the whole stream concatenates", func(t *testing.T) {
+		conv := newChunkConverter()
+		var chunks []*schema.AgenticMessage
+		for _, msg := range []*schema.Message{
+			textChunk("ALPHA"),
+			toolChunk(0, "call_1", "get_time", `{"city": "Madrid"}`),
+			textChunk("OMEGA"),
+		} {
+			out, err := conv.convert(msg)
+			assert.NoError(t, err)
+			chunks = append(chunks, out)
+		}
+		full, err := schema.ConcatAgenticMessages(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, full.ContentBlocks, 3)
+		assert.Equal(t, schema.ContentBlockTypeAssistantGenText, full.ContentBlocks[0].Type)
+		assert.Equal(t, schema.ContentBlockTypeFunctionToolCall, full.ContentBlocks[1].Type)
+		assert.Equal(t, schema.ContentBlockTypeAssistantGenText, full.ContentBlocks[2].Type)
+	})
+}

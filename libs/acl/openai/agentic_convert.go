@@ -107,7 +107,12 @@ func (c *chunkConverter) advanceContent(blockType schema.ContentBlockType, sourc
 		c.lastContentPartIndex = sourceIndex
 		return
 	}
-	if blockType != c.lastContentType || sourceIndex != c.lastContentPartIndex {
+	// Content that resumes after tool calls is a new block: the current index belongs to the
+	// last tool call, whatever the previous content type was. Some backends (vLLM, for one)
+	// keep streaming text after a tool call, and without this the trailing text shared the
+	// tool call's index and concatenation failed with a content block type mismatch.
+	if c.inToolCalls || blockType != c.lastContentType || sourceIndex != c.lastContentPartIndex {
+		c.inToolCalls = false
 		c.curIndex++
 		c.lastContentType = blockType
 		c.lastContentPartIndex = sourceIndex
